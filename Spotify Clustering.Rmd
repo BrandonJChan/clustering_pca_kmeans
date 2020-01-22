@@ -1,0 +1,324 @@
+---
+title: "spodifye"
+output: html_document
+---
+
+```{r Reading in JSON data, message = F, warning = F}
+library(rjson)
+library(tidyverse)
+library(spotifyr)
+library(ggfortify)
+library(factoextra)
+library(GGally)
+
+streamJson <- "C:/Users/bchan/Documents/my_spotify_data/MyData/StreamingHistory.json"
+streamList <- fromJSON(paste(readLines(streamJson), collapse = ""))
+streamdf <- bind_rows(lapply(streamList, as.data.frame))
+```
+
+```{r favtracks}
+favtracks <- streamdf %>% 
+  group_by(trackName, artistName) %>% 
+  summarise(totalTime = sum(msPlayed)) %>% 
+  arrange(-totalTime)
+```
+
+
+```{r}
+Sys.setenv(SPOTIFY_CLIENT_ID = 'b933e8011ebe4d68a6dcb80fa40faa36')
+Sys.setenv(SPOTIFY_CLIENT_SECRET = '0f3629522e8249f5bca055bd2ab7c7a5')
+
+token <- get_spotify_access_token()
+```
+
+```{r, message = F, warning = F}
+trackartist <- streamdf %>% 
+  distinct(trackName, artistName) %>% 
+  mutate(trartist = paste(trackName, artistName, sep = "|||"))
+
+
+search_id <- function(trartist){
+  trackName = unlist(strsplit(trartist, "|||", 2))[1]
+  artistName = unlist(strsplit(trartist, "|||", 2))[2]
+  search <- search_spotify(q = paste("track:", trackName, " artist:", artistName, sep = ""), type = "track", limit = 1, authorization = token)
+  if(nrow(search) == 0){return("still nah")}
+  return(search$id[1])
+}
+
+ids1 <- c()
+for (tracknum in 1:length(trackartist$trartist)){
+  ids1[tracknum] = search_id(trackartist$trartist[tracknum])
+}
+
+trackartist$ids1 <- ids1
+trackartist <- trackartist %>% 
+  mutate(id = case_when(trackName == "Fried Rice (with JID)" ~ search_id("Fried Rice (with JID)|||Bas"),
+                          TRUE ~ ids1)
+  ) %>% 
+  select(-ids1, -trartist) %>% 
+  filter(id != "still nah")
+
+#write.csv(trackartist, file = "Tracks with IDs.csv", row.names = F)
+```
+
+
+```{r}
+featrowlist <- list()
+low <- 1
+high <- 100
+for (i in 1:((nrow(trackartist) %/% 100) + 1)){
+  featrowlist[[i]] <- low:high
+  low <- high + 1
+  high <- low + 99
+  if (high > nrow(trackartist)){
+    high <- nrow(trackartist)
+  }
+}
+
+features <- bind_rows(lapply(featrowlist, function(rows){
+  get_track_audio_features(trackartist$id[rows], token)
+})) %>% 
+  select(c(13, 1:11, 17:18))
+```
+
+```{r}
+trackfeatures <- left_join(trackartist, features, by = "id") %>% 
+  left_join(favtracks, by = c("trackName" = "trackName", "artistName" = "artistName")) %>% 
+  filter(totalTime >= duration_ms) %>% 
+  arrange(-totalTime)
+
+mostlistened <- trackfeatures %>% 
+  mutate(trackName = case_when(str_detect(trackName, "\\(") ~ str_sub(trackName, start = 1, end = str_locate(trackName, "\\(")[,1] - 2),
+                               str_detect(trackName, "\\|")  ~ str_sub(trackName, start = 1, end = str_locate(trackName, "\\|")[,1] - 2),
+                               TRUE ~ trackName)
+  )
+
+mostartists <- mostlistened %>% 
+  group_by(artistName) %>% 
+  summarise_if(is.numeric, mean)
+
+colnames(mostartists)[2:15] <- c("Danceability", "Energy", "Key", "Loudness", "Mode", "Speechiness", "Acousticness", "Instrumentalness", "Liveness", "Valence", "Tempo", "Song Length", "Time Signature", "Total Time Listened")
+
+mostlistened %>% arrange(-liveness)
+  
+#mostlistened %>% arrange(-key)
+```
+
+FINAL CLUSTERS
+Cluster artists
+  key to duration
+  PC1 - high loudness, low everything else
+  PC2 - high everything else except accousticness, low instrumentalness
+  PC3 - high accousticness, low everything else except key
+  PC4 - high mode, low liveness
+  PC5 - high speechiness and lowkey accousticness, low everything else
+kmeans for PC1 to PC5 with 4 clusters/centers
+Clusters
+  Rap 
+    high speechiness (highest by far), liveness, valence, loudness
+    low instrumentalness
+  General Turn up (singing)
+    high loudness, valence, liveness
+    low instrumentalness and speechiness
+  Instrumentals
+    high instrumentalness (highest by far), accousticness
+    low loudness, speechiness, and valence
+  Sad Boi
+    high accousticness (highest by far)
+    low energy, loudness, speechiness, liveness, valence, and tempo
+
+Mode indicates the modality of a track, the type of scale from which its melodic content is derived. Major is 1 and minor is 0.
+
+```{r}
+mat <- as.matrix((mostartists %>% na.omit())[,c(2:13)])
+rownames(mat) <- (mostartists %>% na.omit())$artistName
+pcout <- prcomp(mat, scale = T, center = F)
+
+biplot <- autoplot(pcout, 
+         loadings = T, 
+         loadings.label = T,
+         loadings.label.colour = "#1DB954",
+         loadings.colour = "#1DB954",
+         shape = F, 
+         label = T,
+         label.size = 3,
+         loadings.label.vjust = 1.4,
+         loadings.label.size = 4) + xlab("Principal Component 1") + ylab("Principal Component 2")
+biplot
+ggsave(filename = "Spotify Biplot.png", plot = biplot, width = 9, device = NULL, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+pcvariance <- function(pcoutt, pcnum){
+  variances <- (pcoutt$sdev) ^ 2
+  paste(signif(((variances[pcnum] / sum(variances)) * 100), 5), "%", sep = "")
+}
+
+pcvariance(pcout, 1)
+```
+
+
+```{r}
+loadings <- data.frame(
+  
+  loading = c(pcout$rotation[,1], pcout$rotation[,2], pcout$rotation[,3], pcout$rotation[,4], pcout$rotation[,5], pcout$rotation[,6]),
+  
+  PCnum = c(rep.int(1, 12), rep.int(2, 12), rep.int(3, 12), rep.int(4, 12), rep.int(5, 12), rep.int(6, 12)),
+  
+  playtype = rep(colnames(mostartists)[2:13], 6)
+) %>% 
+  mutate(sign = case_when(loading < 0 ~ "n",
+                          loading > 0 ~ "p"),
+         absloading = abs(loading))
+
+loadingsplot <- function(PCnumber){
+  ggplot((loadings %>% filter(PCnum == PCnumber)), aes(x = reorder(playtype, loading), y = loading, fill = absloading)) + 
+  geom_col() + 
+  theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1), legend.position = "none") + 
+  scale_fill_gradient(low = "#0d4a22", high = "#28de67") + 
+  xlab("Audio Feature") + ylab("Loading Value")
+}
+
+loadings1 <- loadingsplot(1)
+loadings2 <- loadingsplot(2)
+loadings3 <- loadingsplot(3)
+loadings4 <- loadingsplot(4)
+loadings5 <- loadingsplot(5)
+loadingsplot(6)
+
+ggsave(filename = "Spotify PC1 Loadings.png", plot = loadings1, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify PC2 Loadings.png", plot = loadings2, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify PC3 Loadings.png", plot = loadings3, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify PC4 Loadings.png", plot = loadings4, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify PC5 Loadings.png", plot = loadings5, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+km <- kmeans(pcout$x[,1:5], centers = 4)
+halp <- as.data.frame(km$cluster) %>% mutate(team = row.names(as.data.frame(km$cluster))) %>% arrange(km$cluster) %>% select(team, `km$cluster`)
+ggplot(, aes(x = pcout$x[,1], y = pcout$x[,2])) + geom_point(aes(col = as.factor(km$cluster))) + xlab("First PC") + ylab("Second PC") + scale_color_discrete(name = "Cluster") + geom_point(aes(x = km$centers[,1], y = km$centers[,2], pch = factor(1:4)))
+mostartists$cluster <- km$cluster
+```
+
+```{r}
+trackfeatures %>% filter(artistName == "Monte Booker")
+View(mostartists %>% filter(as.numeric(cluster) == 4))
+mostartistscluster <- mostartists %>% mutate(cluster = as.factor(cluster))
+clusters <- autoplot(pcout, 
+                     data = mostartistscluster,
+                     colour = "cluster",
+                     label = T, 
+                     shape = F, 
+                     loadings = T, 
+                     loadings.label = T,
+                     loadings.label.colour = "black",
+                     loadings.label.hjust = 0.5,
+                     loadings.label.vjust = 1.4,
+                     loadings.colour = "black",
+                     label.size = 3,
+                     loadings.label.size = 4) + 
+  xlab("Principal Component 1") +
+  ylab("Principal Component 2") +
+  scale_color_discrete(name = "Cluster", labels = c("Turn Up", "Rap", "Instrumental", "Turn Down"))
+clusters
+ggsave(filename = "Spotify Clustering w Loadings.png", plot = clusters, device = NULL, width = 11, path = "C:/Users/bchan/Documents/Final Presentation")
+
+#C77CFF purple
+#F8766D orange
+#00BFC4 blue
+#7CAE00 green
+
+clustersNoLoad <- autoplot(pcout, 
+                     data = mostartistscluster,
+                     colour = "cluster",
+                     label = T, 
+                     shape = F, 
+                     loadings = F, 
+                     loadings.label = F,
+                     loadings.label.colour = "black",
+                     loadings.label.hjust = 0.5,
+                     loadings.label.vjust = 1.4,
+                     loadings.colour = "black",
+                     label.size = 3,
+                     loadings.label.size = 4) + 
+  xlab("Principal Component 1") +
+  ylab("Principal Component 2") +
+  scale_color_discrete(name = "Cluster", labels = c("Turn Up", "Rap", "Instrumental", "Turn Down"))
+ggsave(filename = "Spotify Clustering wo Loadings.png", plot = clustersNoLoad, device = NULL, width = 11, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+View(mostartistscluster %>% filter(as.numeric(cluster) == 3))
+```
+
+
+```{r}
+mostartistscluster <- mostartistscluster %>% 
+  mutate(cluster = as.numeric(cluster)) %>% 
+  select(-`Time Signature`)
+
+avgcols <- colnames(mostartistscluster)[2:13]
+
+one <- (mostartistscluster %>% filter(cluster == 1)) %>% 
+  mutate(numart = n()) %>% 
+  select(-artistName) %>% 
+  summarise_all(list(~mean(.), ~sum(.))) %>% 
+  select(c(1:12, 14, 28))
+
+two <- (mostartistscluster %>% filter(cluster == 2)) %>% 
+  mutate(numart = n()) %>% 
+  select(-artistName) %>% 
+  summarise_all(list(~mean(.), ~sum(.))) %>% 
+  select(c(1:12, 14, 28))
+
+three <- (mostartistscluster %>% filter(cluster == 3)) %>% 
+  mutate(numart = n()) %>% 
+  select(-artistName) %>% 
+  summarise_all(list(~mean(.), ~sum(.))) %>% 
+  select(c(1:12, 14, 28))
+
+avgfeatures <- (mostartistscluster %>% filter(cluster == 4)) %>% 
+  mutate(numart = n()) %>% 
+  select(-artistName) %>% 
+  summarise_all(list(~mean(.), ~sum(.))) %>% 
+  select(c(1:12, 14, 28)) %>% 
+  bind_rows(three, two , one)
+
+colnames(avgfeatures) <- c("Danceability", "Energy", "Key", "Loudness", "Mode", "Speechiness", "Acousticnesss", "Instrumentalness", "Liveness", "Valence", "Tempo", "Song Length", "Cluster", "Total Time Listened")
+
+nonscale <- avgfeatures %>% select(Cluster, `Total Time Listened`)
+
+avgfeatures <- avgfeatures %>% 
+  select(-Cluster, -`Total Time Listened`) %>% 
+  scale() %>% 
+  cbind(nonscale) %>% 
+  gather(feature, score, -Cluster)
+```
+
+```{r}
+featureorder <- c("Loudness", "Energy", "Valence", "Tempo", "Danceability", "Speechiness", "Liveness", "Song Length", "Key", "Mode", "Acousticnesss", "Instrumentalness")
+featureplot <- function(clusternum, color){
+  ggplot((avgfeatures %>% filter(Cluster == clusternum & !str_detect(feature, "Total"))), aes(x = feature, y = score)) + 
+    geom_col(fill = color) + 
+    theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1)) +
+   scale_x_discrete(limits = featureorder) +
+    ylim(-1.5, 1.5) + 
+    xlab("Audio Feature") +
+    ylab("Standardized Average")
+}
+
+features1 <- featureplot(1, "#F8766D")
+features2 <- featureplot(2, "#7CAE00")
+features3 <- featureplot(3, "#00BFC4")
+features4 <- featureplot(4, "#C77CFF")
+
+ggsave(filename = "Spotify Turn Up Features.png", plot = features1, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify Rap Features.png", plot = features2, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify Instrumental Features.png", plot = features3, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Spotify Turn Down Features.png", plot = features4, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+write.csv(mostartistscluster, file = "C:/Users/bchan/Documents/Final Presentation/spotify artsits clustered.csv", row.names = F)
+```
+
