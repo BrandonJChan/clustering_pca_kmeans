@@ -1,0 +1,298 @@
+---
+title: "edresults students"
+output: html_document
+---
+
+```{r, message = F, warning = F}
+library(RODBC)
+library(safer)
+library(tidyverse)
+library(ggfortify)
+```
+
+```{r}
+isnum <- function(thing) {!is.na(as.numeric(thing))}
+```
+
+
+```{r}
+dbconnection <- odbcConnect("Brandon Project", uid = "bchan", pwd = decrypt_string(pword))
+```
+
+```{r}
+aldineeng <- sqlQuery(dbconnection, "select * from dbo.AldineEng1718")
+aldinemath <- sqlQuery(dbconnection, "select * from dbo.AldineMath1718")
+aldinecourses <- sqlQuery(dbconnection, "select * from [dbo].[Houston_Aldine_Course_AllYears]")
+length(unique(aldinecourses$Course_Subject))
+unique(aldinecourses$Course_Subject)
+
+aldinecourses %>% filter(Derived_Student_Identifier == aldinecourses$Derived_Student_Identifier[1])
+```
+
+```{r}
+aldineeng$isk <- unlist(lapply(aldineeng$isk, function(list){paste(unlist(lapply(list, as.character)), collapse = "")}))
+aldinemath$isk <- unlist(lapply(aldinemath$isk, function(list){paste(unlist(lapply(list, as.character)), collapse = "")}))
+
+aldine <- inner_join(aldineeng, aldinemath, by = "isk") %>% 
+  mutate(GPAeng = GPA.x,
+         GPAmath = GPA.y) %>% 
+  select(isk, GPAeng, GPAmath)
+```
+
+```{r}
+aldinemat <- as.matrix(aldine[,2:3])
+aldinepca <- prcomp(aldinemat)#, scale = T, center = T)
+autoplot(aldinepca, loadings = T, loadings.label = T)
+```
+
+```{r, message = F, warning = F}
+aldinepcadf <- aldinecourses %>% 
+  mutate(Course_Mark = as.numeric(str_replace(as.character(Course_Mark), "D", ""))) %>% 
+  group_by(Derived_Student_Identifier, Course_Subject) %>% 
+  summarise(avgGrade = mean(Course_Mark)) %>% 
+  filter(!is.na(avgGrade)) %>% 
+  spread(Course_Subject, avgGrade)
+
+aldinerepeats <- aldinepcadf[,c(1,3:4, 7:11, 15:17, 20:23, 31:32)] %>% 
+  gather(subject, grade, -Derived_Student_Identifier) %>% 
+  filter(!is.na(grade)) %>% 
+  mutate(broadSub = case_when(str_detect(subject, "Career") ~ "Career/Tech Ed",
+                              str_detect(subject, "Fine Arts") ~ "Fine Arts",
+                              str_detect(subject, "Language") ~ "Language Other Than English",
+                              str_detect(subject, "Local Credit") ~ "Local Credit",
+                              str_detect(subject, "Tech Appl") | str_detect(subject, "Technical Applications") ~ "Technical Applications",
+                              str_detect(subject, "Physical") | str_detect(subject, "Athletics") ~ "PE/Athletics")
+         ) %>% 
+  group_by(Derived_Student_Identifier, broadSub) %>% 
+  summarise(grade = mean(grade)) %>% 
+  spread(broadSub, grade)
+
+aldinepcadf1 <- aldinepcadf %>% 
+  select(-c(2:4, 7:11, 15:17, 20:23, 31:32)) %>% 
+  left_join(aldinerepeats, by = "Derived_Student_Identifier")
+
+subject <- c()
+naprop <- c()
+for (rownum in 1:20){
+  colnum = rownum + 1
+  subject[rownum] <- colnames(aldinepcadf1)[colnum]
+  naprop[rownum] <- nrow(aldinepcadf1[which(is.na(aldinepcadf1[,colnum])), colnum]) / nrow(aldinepcadf1[, colnum])
+}
+napropdf <- data.frame(
+  subject = subject,
+  naprop = naprop
+)
+
+napropdf %>% arrange(naprop)
+```
+
+```{r}
+aldinepcadf2 <- aldinepcadf1 %>% 
+  select(Derived_Student_Identifier,
+         `Social Studies`,
+         Science,
+         Mathematics,
+         `PE/Athletics`,
+         `Local Credit`,
+         `Career/Tech Ed`,
+         `Fine Arts`,
+         `Language Arts`,
+         `Language Other Than English`) %>% 
+  na.omit()
+```
+
+```{r}
+aldinemat <- as.matrix(aldinepcadf2[,2:10])
+row.names(aldinemat) = aldinepcadf2$Derived_Student_Identifier
+aldineout <- prcomp(aldinemat, scale = T, center = T)
+biplot <- autoplot(aldineout, 
+                   loadings = T, 
+                   loadings.label = T,
+                   loadings.label.vjust = -0.3,
+                   loadings.colour = "#BA1500",
+                   loadings.label.colour = "#BA1500") + xlab("Principal Component 1") + ylab("Principal Component 2")
+biplot
+ggsave(filename = "Aldine Biplot.png", plot = biplot, device = NULL, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+pcvariance <- function(pcout, pcnum){
+  variances <- (pcout$sdev) ^ 2
+  paste(signif(((variances[pcnum] / sum(variances)) * 100), 5), "%", sep = "")
+}
+
+pcvariance(aldineout, 2)
+```
+
+```{r}
+loadings <- data.frame(
+  
+  loading = c(aldineout$rotation[,1], aldineout$rotation[,2], aldineout$rotation[,3], aldineout$rotation[,4], aldineout$rotation[,5]),
+  
+  PCnum = c(rep.int(1, 9), rep.int(2, 9), rep.int(3, 9), rep.int(4, 9), rep.int(5, 9)),
+  
+  playtype = rep(colnames(aldinepcadf2)[2:10], 5)
+) %>% 
+  mutate(sign = case_when(loading < 0 ~ "n",
+                          loading > 0 ~ "p"),
+         absloading = abs(loading))
+
+loadings1 <-ggplot((loadings %>% filter(PCnum == 1)), aes(x = reorder(playtype, loading), y = loading, fill = absloading)) + 
+  geom_col() + 
+  theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1), legend.position = "none") + 
+  scale_fill_gradient(low = "#802E2E", high = "#F35353") + 
+  xlab("Subject") + ylab("Loading Value")
+
+loadings2 <- ggplot((loadings %>% filter(PCnum == 2)), aes(x = reorder(playtype, loading), y = loading, fill = absloading)) + 
+  geom_col() + 
+  theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1), legend.position = "none") + 
+  scale_fill_gradient(low = "#802E2E", high = "#F35353") + 
+  xlab("Subject") + ylab("Loading Value")
+
+loadings3 <- ggplot((loadings %>% filter(PCnum == 3)), aes(x = reorder(playtype, loading), y = loading, fill = absloading)) + 
+  geom_col() + 
+  theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1), legend.position = "none") + 
+  scale_fill_gradient(low = "#802E2E", high = "#F35353") + 
+  xlab("Subject") + ylab("Loading Value")
+
+loadings1
+loadings2
+loadings3
+
+ggsave(filename = "Aldine PC1 Loadings.png", plot = loadings1, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Aldine PC2 Loadings.png", plot = loadings2, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+ggsave(filename = "Aldine PC3 Loadings.png", plot = loadings3, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+PC1
+  High everything, PE is the least influential
+  Separates students with good overall grades and bad overall grades
+PC2
+  High PE and everything else is pretty inconsequential
+  Separates students who do good in PE and those who do not do good in PE
+  Maybe troublemakers and nontroublemakers because thats the only way to get a poor grade in PE
+PC3
+  Highish Language Other Than English
+  Very low Fine Arts and lowish Local Credit
+PC4
+  High Fine Arts and Language Other Than English
+  Low Local Credit
+PC5
+  High Career/Tech Ed
+  Low Local Credit and Language Other Than English
+  
+INTERESTING
+  The principal component that separates those who are good at math and science, but bad at language arts and social studies is PC7 and only accounts for 2.6 percent of the variation in the data. Much lower than expected.
+
+```{r}
+km <- kmeans(pcout$x[,1:5], centers = 4)
+halp <- as.data.frame(km$cluster) %>% mutate(team = row.names(as.data.frame(km$cluster))) %>% arrange(km$cluster) %>% select(team, `km$cluster`)
+ggplot(, aes(x = pcout$x[,1], y = pcout$x[,2])) + geom_point(aes(col = as.factor(km$cluster))) + xlab("First PC") + ylab("Second PC") + scale_color_discrete(name = "Cluster") + geom_point(aes(x = km$centers[,1], y = km$centers[,2], pch = factor(1:4)))
+mostartists$cluster <- km$cluster
+```
+
+```{r}
+km <- kmeans(aldineout$x[,1:5], centers = 5)
+
+halp <- as.data.frame(km$cluster) %>% 
+  mutate(team = row.names(as.data.frame(km$cluster))) %>% 
+  arrange(`km$cluster`) %>% 
+  select(team, `km$cluster`)
+
+ggplot(, aes(x = aldineout$x[,1], y = aldineout$x[,2])) + geom_point(aes(col = as.factor(km$cluster))) + xlab("First PC") + ylab("Second PC") + scale_color_discrete(name = "Cluster") + geom_point(aes(x = km$centers[,1], y = km$centers[,2], pch = factor(1:5)))
+aldinepcadf2$cluster <- km$cluster
+```
+
+```{r, message = F, warning = F}
+aldinepcadf2 <- aldinepcadf2 %>% 
+  mutate(cluster = as.factor(cluster))
+aldinepcadf2$cluster <- as.factor(aldinepcadf2$cluster)
+
+write.csv(aldinepcadf2, file = "C:/Users/bchan/Documents/Final Presentation/aldine students clustered.csv", row.names = F)
+```
+
+```{r, message = F, warning = F}
+aldinepcadfhmm <- aldinepcadf2 %>% 
+  mutate(ordering = case_when(as.numeric(cluster) == 4 ~ 1,
+                              as.numeric(cluster) == 1 ~ 2,
+                              as.numeric(cluster) == 3 ~ 3,
+                              as.numeric(cluster) == 5 ~ 4,
+                              as.numeric(cluster) == 2 ~ 5)) %>%
+  mutate(ordering = as.factor(ordering))
+
+clusters <- autoplot(aldineout, 
+                     data = aldinepcadfhmm[,-1],
+                     colour = "ordering",
+                     label = F, 
+                     shape = T, 
+                     loadings = T, 
+                     loadings.label = T,
+                     loadings.label.vjust = -0.3,
+                     loadings.colour = "black") + 
+  xlab("Principal Component 1") +
+  ylab("Principal Component 2") +
+  scale_color_discrete(name = "Cluster", labels = c("A/High B Student", "Low B Student", "High C Student", "Low C Student",  "Low D/F Students"))
+
+clusters
+
+ggsave(filename = "Aldine Clusters.png", plot = clusters, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+
+```{r}
+clusteravgs <- aldinepcadf2 %>%
+  group_by(cluster) %>% 
+  summarise_if(is.numeric, mean) %>% 
+  gather(metric, freq, -cluster)
+
+subjectorder <- c("Science", "Language Arts", "Mathematics", "Social Studies", "Career/Tech Ed", "Language Other Than English", "Local Credit", "Fine Arts", "PE/Athletics")
+featureplot <- function(clusternum, color){
+  ggplot((clusteravgs %>% filter(cluster == clusternum)), aes(x = metric, y = freq, label = round(freq, 1))) + 
+    geom_col(fill = color) + 
+    geom_text(size = 10, position = position_stack(vjust = 0.9)) +
+    theme(text = element_text(size = 20), axis.text.x = element_text(angle = 50, hjust = 1)) +
+    scale_x_discrete(limits = subjectorder) +
+    ylim(0, 100) + 
+    xlab("Subject") +
+    ylab("Average Grade")
+}
+
+ABfeat <- featureplot(4, "#F8766D")
+Bfeat <- featureplot(1, "#A3A500")
+HighCfeat <- featureplot(3, "#00BF7D")
+LowCfeat <- featureplot(5, "#00B0F6")
+DFfeat <- featureplot(2, "#E76BF3")
+
+ggsave(filename = "Aldine AB Features.png", plot = ABfeat, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+
+ggsave(filename = "Aldine Low B Features.png", plot = featureplot(1, "#A3A500"), device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+
+ggsave(filename = "Aldine High C Features.png", plot = HighCfeat, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+
+ggsave(filename = "Aldine Low C Features.png", plot = LowCfeat, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+
+ggsave(filename = "Aldine DF Features.png", plot = DFfeat, device = NULL, width = 13, path = "C:/Users/bchan/Documents/Final Presentation")
+```
+
+```{r}
+library(tidyverse)
+aldinepcadf2 <- read.csv("C:/Users/bchan/Documents/Final Presentation/aldine students clustered.csv")
+clusteravgs <- aldinepcadf2 %>%
+  group_by(cluster) %>% 
+  summarise_if(is.numeric, mean) %>% 
+  gather(metric, freq, -cluster)
+
+clusteravgs <- clusteravgs %>% mutate(metric = gsub("\\.", " ", as.character(metric))) %>% 
+  mutate(metric = case_when(metric == "Career Tech Ed" ~ "Career/Tech Ed",
+                            metric == "PE Athletics" ~ "PE/Athletics",
+                            T ~ metric))
+
+featureplot(1, "#A3A500")
+
+
+```
+
+
+
+
+
