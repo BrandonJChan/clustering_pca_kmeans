@@ -1,0 +1,414 @@
+---
+title: "NBA player clustering"
+output: html_document
+---
+#Load all necessary packages
+tidyverse for wrangling and manipulating data
+nbastatR and ballr to webscrape nba statistics
+ggfortify and GGally for autoplot data visualizations
+```{r packages, message = F, warning = F}
+library(tidyverse)
+library(nbastatR)
+library(ballr)
+library(ggfortify)
+library(GGally)
+```
+
+Obtain raw data and wrangle so it can be analyzed
+```{r obtain and wrangle data, message = F, warning = F}
+teamplayerstats <- teams_players_stats(seasons = 2019, types = "player")
+
+playerbox <- teams_players_stats(seasons = 2017:2019,
+                               types = "player",
+                               tables = c("general", "hustle", "shot locations"),
+                               measures = c("Base", "Advanced"),
+                               modes = "PerGame",
+                               defenses = "Overall",
+                               assign_to_environment = F)
+
+seasonTables <- list()
+for (tablenum in 1:nrow(playerbox)){
+  seasonTables[[tablenum]] <- playerbox$dataTable[[tablenum]] %>% mutate(season = playerbox$slugSeason[tablenum])
+}
+playerbox$dataTable = seasonTables
+
+playerboxstats <- left_join(
+  
+  bind_rows(lapply(playerbox$dataTable[1:3], function(df){df %>% select(10, 76, 14, 20:22, 34:35, 41:43, 45:53)})),
+  
+  bind_rows(lapply(playerbox$dataTable[4:6], function(df){df %>% select(4, 31, 9:11, 14:15, 17, 20)})),
+  
+  by = c("namePlayer" = "namePlayer", "season" = "season")
+  
+) %>%
+  
+  left_join(
+    
+    bind_rows(lapply(playerbox$dataTable[7:9], function(df){df %>% select(11, 37, 16:17, 19:20, 22:23, 25:26, 28:29, 31:32, 34:35)})),
+    
+    by = c("namePlayer" = "namePlayer", "season" = "season")
+    
+  ) %>% 
+  
+  left_join(
+    
+    bind_rows(lapply(playerbox$dataTable[10:12], function(df){df %>% select(10, 87, 16:18, 20:24, 50, 53, 56, 58)})),
+    
+    by = c("namePlayer" = "namePlayer", "season" = "season")
+  )
+
+playerboxstats <- playerboxstats %>%
+  select(-23) %>% 
+  filter(
+    namePlayer %in% (playerboxstats %>% group_by(namePlayer) %>% summarise(totalgp = sum(gp)) %>% filter(totalgp >= 50))$namePlayer
+  )
+
+pergamecols <- c(4, 7, 9, 10:19, 21:24, 26:27, 29, 31, 33, 35, 37, 39)
+othercols <- setdiff(4:52, pergamecols)
+
+pergame <- playerboxstats %>% select(pergamecols)
+pergame <- pergame %>% 
+  mutate_all(function(col){col * playerboxstats$gp}) %>% 
+  cbind(playerboxstats[,1:3]) %>% 
+  group_by(namePlayer) %>% 
+  summarise_if(is.numeric, sum) 
+
+pergame1 <- pergame %>% select(-c(1, 27)) %>% 
+  mutate_all(function(col){col / pergame$gp}) %>% 
+  cbind(pergame %>% select(1))
+
+other <- playerboxstats %>% select(1, othercols) %>% 
+  group_by(namePlayer) %>% 
+  summarise_if(is.numeric, mean)
+
+playerboxstats <- left_join(other, pergame1, by = "namePlayer") %>% 
+  mutate(nameAbrev = paste(substring(str_split_fixed(namePlayer, " ", n = 2)[,1], 1, 1), ". ", str_split_fixed(namePlayer, " ", n = 2)[,2], sep = "")) %>% 
+  select(c(51, 2:50)) %>% 
+  na.omit()
+```
+
+
+```{r}
+pboxmat <- as.matrix(playerboxstats[,c(44:49, 29, 30, 35, 19)])
+rownames(pboxmat) <- playerboxstats$nameAbrev
+pboxout <- prcomp(pboxmat, scale = T, center = T)
+autoplot(pboxout, label = T, shape = F, loadings = T, loadings.label = T)
+pboxout$rotation
+help(autoplot)
+```
+
+
+```{r Player possessions, message = F, warning = F}
+playersynergy <- synergy(seasons = 2013:2019, result_types = "player", set_types = c("offensive"), categories = c("Transition", "Isolation", "PRBallHandler", "PRRollman", "Postup",  "Spotup", "Handoff", "Cut", "OffScreen", "OffRebound", "Misc"))
+
+synplayer <- lapply(playersynergy$dataSynergy, function(df){
+  dfnew <- df %>% 
+    mutate(season = playersynergy$slugSeason[sapply(playersynergy$dataSynergy, all.equal, current = df) == "TRUE"]) %>% 
+    select(season, namePlayer, pctFrequency)
+  colnames(dfnew)[3] <- paste(playersynergy$categorySynergy[sapply(playersynergy$dataSynergy, all.equal, current = df) == "TRUE"], "pctFrequency")
+  dfnew
+}) %>% 
+  
+  reduce(full_join, by = c("season" = "season", "namePlayer" = "namePlayer")) %>% 
+  
+  mutate(
+    `Transition pctFrequency` = as.numeric(substring(str_replace_all(paste(`Transition pctFrequency.x`, `Transition pctFrequency.y`, `Transition pctFrequency`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Isolation pctFrequency` = as.numeric(substring(str_replace_all(paste(`Isolation pctFrequency.x`, `Isolation pctFrequency.y`, `Isolation pctFrequency.x.x`, `Isolation pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `PRBallHandler pctFrequency` = as.numeric(substring(str_replace_all(paste(`PRBallHandler pctFrequency.x`, `PRBallHandler pctFrequency.y`, `PRBallHandler pctFrequency.x.x`, `PRBallHandler pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `PRRollman pctFrequency` = as.numeric(substring(str_replace_all(paste(`PRRollman pctFrequency.x`, `PRRollman pctFrequency.y`, `PRRollman pctFrequency.x.x`, `PRRollman pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Postup pctFrequency` = as.numeric(substring(str_replace_all(paste(`Postup pctFrequency.x`, `Postup pctFrequency.y`, `Postup pctFrequency.x.x`, `Postup pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Spotup pctFrequency` = as.numeric(substring(str_replace_all(paste(`Spotup pctFrequency.x`, `Spotup pctFrequency.y`, `Spotup pctFrequency.x.x`, `Spotup pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Handoff pctFrequency` = as.numeric(substring(str_replace_all(paste(`Handoff pctFrequency.x`, `Handoff pctFrequency.y`, `Handoff pctFrequency.x.x`, `Handoff pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Cut pctFrequency` = as.numeric(substring(str_replace_all(paste(`Cut pctFrequency.x`, `Cut pctFrequency.y`, `Cut pctFrequency.x.x`, `Cut pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `OffScreen pctFrequency` = as.numeric(substring(str_replace_all(paste(`OffScreen pctFrequency.x`, `OffScreen pctFrequency.y`, `OffScreen pctFrequency.x.x`, `OffScreen pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `OffRebound pctFrequency` = as.numeric(substring(str_replace_all(paste(`OffRebound pctFrequency.x`, `OffRebound pctFrequency.y`, `OffRebound pctFrequency.x.x`, `OffRebound pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Misc pctFrequency` = as.numeric(substring(str_replace_all(paste(`Misc pctFrequency.x`, `Misc pctFrequency.y`, `Misc pctFrequency.x.x`, `Misc pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8))
+         ) %>% 
+  #left_join(teamdeets$dataTable[[1]] %>% select(nameTeam, slugTeam), by = "nameTeam") %>% 
+  
+  #mutate(seasonTeam = paste(substring(season, 3, 7), slugTeam)) %>% 
+    
+  #filter(season %in% c("2016-17", "2017-18", "2018-19")) %>%
+  
+  #left_join(passing, by = c("season" = "Year", "nameTeam" = "Team")) %>% 
+  
+  select(namePlayer, `Transition pctFrequency`, `Isolation pctFrequency`, `PRBallHandler pctFrequency`, `PRRollman pctFrequency`, `Postup pctFrequency`, `Spotup pctFrequency`, `Handoff pctFrequency`, `Cut pctFrequency`, `OffScreen pctFrequency`, `OffRebound pctFrequency`, `Misc pctFrequency`)
+
+synplayer[is.na(synplayer)] <- 0
+
+synplayer <- synplayer %>% 
+  group_by(namePlayer) %>% 
+  
+  summarise(`Transition pctFrequency` = mean(`Transition pctFrequency`),
+            `Isolation pctFrequency` = mean(`Isolation pctFrequency`),
+            `PRBallHandler pctFrequency` = mean(`PRBallHandler pctFrequency`),
+            `PRRollman pctFrequency` = mean(`PRRollman pctFrequency`),
+            `Postup pctFrequency` = mean(`Postup pctFrequency`),
+            `Spotup pctFrequency` = mean(`Spotup pctFrequency`),
+            `Handoff pctFrequency` = mean(`Handoff pctFrequency`),
+            `Cut pctFrequency` = mean(`Cut pctFrequency`),
+            `OffScreen pctFrequency` = mean(`OffScreen pctFrequency`),
+            `OffRebound pctFrequency` = mean(`OffRebound pctFrequency`),
+            `Misc pctFrequency` = mean(`Misc pctFrequency`)
+            ) %>% 
+  filter(namePlayer %in% playershots$namePlayer)
+```
+  
+```{r Dataframe Dictionary, message = F, warning = F}
+teamdeets <- teams_details(all_teams = T)
+teamabrev <- teamdeets[[2]][[1]] %>% select(nameTeam, slugTeam)
+teamplayerstats <- teams_players_stats(seasons = 2019, types = "team")
+df_dict_nba_teams <- df_nba_team_dict 
+```
+
+```{r NBA team data: Plays, message = F, warning = F}
+teamplays <- synergy(seasons = 2016:2019,
+                   result_types = c("team"),
+                   season_types = c("Regular Season"),
+                   set_types = c("offensive"),
+                   categories = c("Transition", "Isolation", "PRBallHandler", "PRRollman", "Postup", "Spotup", "Handoff", "Cut", "OffScreen", "OffRebound", "Misc"),
+                   results = 500,
+                   assign_to_environment = TRUE,
+                   return_wide = FALSE,
+                   return_message = TRUE)
+```
+
+```{r NBA team data: Shots, message = F, warning = F}
+teamshots17 <- teams_shots(all_active_teams = T, seasons = 2017)
+teamshots18 <- teams_shots(all_active_teams = T, seasons = 2018)
+teamshots19 <- teams_shots(all_active_teams = T, seasons = 2019)
+
+teamshots <- rbind(teamshots17, teamshots18, teamshots19) %>% 
+  mutate(nameTeam = case_when(nameTeam == "LA Clippers" ~ "Los Angeles Clippers",
+                              TRUE ~ nameTeam)) %>%
+  group_by(slugSeason, nameTeam, typeAction) %>% 
+  summarise(n = n()) %>% 
+  mutate(freq = n / sum(n),
+         
+         typeAction = str_to_lower(typeAction),
+         
+         broadAction = case_when(typeAction %in% c("alley oop dunk shot", 
+                                                   "alley oop layup shot", 
+                                                   "running alley oop dunk shot", 
+                                                   "running alley oop layup shot") ~ "Alley oop freq",
+                                 
+                                 typeAction %in% c("cutting dunk shot",
+                                                   "cutting finger roll layup shot",
+                                                   "cutting layup shot") ~ "Cut freq",
+                                 
+                                 str_detect(typeAction, "driving") | typeAction %in% c("finger roll layup shot",
+                                                                                       "floating jump shot",
+                                                                                       "layup shot",
+                                                                                       "reverse layup shot",
+                                                                                       "running finger roll layup shot",
+                                                                                       "running hook shot",
+                                                                                       "running layup shot",
+                                                                                       "running reverse layup shot",
+                                                                                       "running dunk shot",
+                                                                                       "running reverse dunk shot") ~ "Drive freq",
+                                 typeAction %in% c("dunk shot",
+                                                   "reverse dunk shot") ~ "Plain dunk freq",
+                                 
+                                 typeAction %in% c("fadeaway bank shot",
+                                                   "fadeaway jump shot",
+                                                   "step back bank jump shot",
+                                                   "step back jump shot",
+                                                   "turnaround fadeaway bank jump shot",
+                                                   "turnaround fadeaway shot",
+                                                   "turnaround jump shot") ~ "Separation jump shot freq",
+                                 
+                                 typeAction %in% c("hook bank shot",
+                                                   "hook shot",
+                                                   "turnaround bank hook shot",
+                                                   "turnaround bank shot",
+                                                   "turnaround hook shot") ~ "Post up freq",
+                                 
+                                 typeAction %in% c("jump bank shot",
+                                                   "jump shot") ~ "Plain jump shot freq",
+                                 
+                                 typeAction %in% c("pullup bank shot",
+                                                   "pullup jump shot",
+                                                   "running pull-up jump shot",
+                                                   "running jump shot") ~ "Pullup/running jump shot freq",
+                                 
+                                 typeAction %in% c("putback dunk shot",
+                                                   "putback layup shot",
+                                                   "tip dunk shot",
+                                                   "tip layup shot") ~ "Putback/Tip freq"
+                                 )
+         ) %>% 
+  group_by(slugSeason, nameTeam, broadAction) %>% 
+  summarise(freq = sum(freq)) %>% 
+  spread(broadAction, freq) %>% 
+  select(-12) %>%
+  
+  left_join(teamabrev, by = "nameTeam") %>% 
+  mutate(seasonTeam = paste(substring(slugSeason, 3, 7), slugTeam)) %>% 
+  ungroup() %>% 
+  select(-slugTeam, -slugSeason, -nameTeam) %>% 
+  select(10, 2:9)
+```
+
+```{r NBA team data: Passing}
+teampassing <- read.csv("C:/Users/bchan/Documents/NBA/20117-2019 Team Passing.csv") %>% 
+  select(1,2,7,13) %>% 
+  mutate(Team = case_when(as.character(Team) == "LA Clippers" ~ "Los Angeles Clippers",
+                          TRUE ~ as.character(Team))) %>% 
+  left_join(teamabrev, by = c("Team" = "nameTeam")) %>% 
+  mutate(seasonTeam = paste(substring(Year, 3, 7), slugTeam))
+```
+Only keeping passes made and adjusted assists because the other stats are measuring the same things
+
+```{r NBA team data: Box and Advanced Stats, message = F, warning = F}
+teambox <- teams_players_stats(seasons = 2017:2019,
+                               types = "team",
+                               tables = c("general", "hustle", "shot locations"),
+                               measures = c("Base", "Advanced"),
+                               modes = "PerGame",
+                               defenses = "Overall",
+                               assign_to_environment = F)
+
+seasonTables <- list()
+for (tablenum in 1:nrow(teambox)){
+  seasonTables[[tablenum]] <- teambox$dataTable[[tablenum]] %>% mutate(season = teambox$slugSeason[tablenum])
+}
+teambox$dataTable = seasonTables
+
+teamboxstats <- left_join(
+  
+  bind_rows(lapply(teambox$dataTable[1:3], function(df){df %>% select(10, 67, 32, 33, 18:20, 34, 38:40, 43, 44, 46, 47:50)})),
+  
+  bind_rows(lapply(teambox$dataTable[4:6], function(df){df %>% select(4, 24, 7, 8, 10:12, 16)})),
+  
+  by = c("nameTeam" = "nameTeam", "season" = "season")
+  
+) %>%
+  
+  left_join(
+    
+    bind_rows(lapply(teambox$dataTable[7:9], function(df){df %>% select(11, 34, 14, 15, 17, 18, 20, 21, 23, 24, 26, 27, 29, 30, 32, 33)})),
+    
+    by = c("nameTeam" = "nameTeam", "season" = "season")
+    
+  ) %>% 
+  
+  left_join(
+    
+    bind_rows(lapply(teambox$dataTable[10:12], function(df){df %>% select(10, 56, 14:16, 18:20, 35, 37, 39, 40, 43)})),
+    
+    by = c("nameTeam" = "nameTeam", "season" = "season")
+    
+  ) %>% 
+  mutate(nameTeam = case_when(as.character(nameTeam) == "LA Clippers" ~ "Los Angeles Clippers",
+                          TRUE ~ as.character(nameTeam))) %>% 
+  left_join(teamabrev, by = c("nameTeam" = "nameTeam")) %>% 
+  mutate(seasonTeam = paste(substring(season, 3, 7), slugTeam)) %>% 
+  select(-nameTeam, -season) %>% 
+  select(49, 1:47)
+```
+
+Tables to join
+teamshots
+teamboxstats
+
+```{r NBA team data: Compile}
+NBAteams <- lapply(teamplays$dataSynergy, function(df){
+  dfnew <- df %>% 
+    mutate(season = teamplays$slugSeason[sapply(teamplays$dataSynergy, all.equal, current = df) == "TRUE"]) %>% 
+    select(season, nameTeam, pctFrequency)
+  colnames(dfnew)[3] <- paste(teamplays$categorySynergy[sapply(teamplays$dataSynergy, all.equal, current = df) == "TRUE"], "pctFrequency")
+  dfnew
+}) %>% 
+  
+  reduce(full_join, by = c("season" = "season", "nameTeam" = "nameTeam")) %>% 
+  
+  mutate(
+    `Transition pctFrequency` = as.numeric(substring(str_replace_all(paste(`Transition pctFrequency.x`, `Transition pctFrequency.y`, `Transition pctFrequency.x.x`, `Transition pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Isolation pctFrequency` = as.numeric(substring(str_replace_all(paste(`Isolation pctFrequency.x`, `Isolation pctFrequency.y`, `Isolation pctFrequency.x.x`, `Isolation pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `PRBallHandler pctFrequency` = as.numeric(substring(str_replace_all(paste(`PRBallHandler pctFrequency.x`, `PRBallHandler pctFrequency.y`, `PRBallHandler pctFrequency`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `PRRollman pctFrequency` = as.numeric(substring(str_replace_all(paste(`PRRollman pctFrequency.x`, `PRRollman pctFrequency.y`, `PRRollman pctFrequency.x.x`, `PRRollman pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Postup pctFrequency` = as.numeric(substring(str_replace_all(paste(`Postup pctFrequency.x`, `Postup pctFrequency.y`, `Postup pctFrequency.x.x`, `Postup pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Spotup pctFrequency` = as.numeric(substring(str_replace_all(paste(`Spotup pctFrequency.x`, `Spotup pctFrequency.y`, `Spotup pctFrequency.x.x`, `Spotup pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Handoff pctFrequency` = as.numeric(substring(str_replace_all(paste(`Handoff pctFrequency.x`, `Handoff pctFrequency.y`, `Handoff pctFrequency.x.x`, `Handoff pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Cut pctFrequency` = as.numeric(substring(str_replace_all(paste(`Cut pctFrequency.x`, `Cut pctFrequency.y`, `Cut pctFrequency.x.x`, `Cut pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `OffScreen pctFrequency` = as.numeric(substring(str_replace_all(paste(`OffScreen pctFrequency.x`, `OffScreen pctFrequency.y`, `OffScreen pctFrequency.x.x`, `OffScreen pctFrequency.y.y`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `OffRebound pctFrequency` = as.numeric(substring(str_replace_all(paste(`OffRebound pctFrequency.x`, `OffRebound pctFrequency.y`, `OffRebound pctFrequency`, sep = ""), "[NA]", ""), 1, 8)),
+    
+    `Misc pctFrequency` = as.numeric(substring(str_replace_all(paste(`Misc pctFrequency.x`, `Misc pctFrequency.y`, `Misc pctFrequency`, sep = ""), "[NA]", ""), 1, 8))
+         ) %>% 
+  left_join(teamdeets$dataTable[[1]] %>% select(nameTeam, slugTeam), by = "nameTeam") %>% 
+    
+  filter(season %in% c("2016-17", "2017-18", "2018-19")) %>%
+  
+  left_join(teampassing, by = c("season" = "Year", "nameTeam" = "Team")) %>% 
+  
+  select(season, nameTeam, seasonTeam, `Transition pctFrequency`, `Isolation pctFrequency`, `PRBallHandler pctFrequency`, `PRRollman pctFrequency`, `Postup pctFrequency`, `Spotup pctFrequency`, `Handoff pctFrequency`, `Cut pctFrequency`, `OffScreen pctFrequency`, `OffRebound pctFrequency`, `Misc pctFrequency`, PASSES.MADE, ADJUSTED.ASSISTS) %>% 
+  
+  left_join(teamshots, by = "seasonTeam") %>% 
+  
+  left_join(teamboxstats, by = "seasonTeam")
+
+colnames(NBAteams)
+```
+
+not much here
+```{r Team PCA}
+teammat <- as.matrix(NBAteams[,4:71])
+rownames(teammat) <- NBAteams$seasonTeam
+teamout <- prcomp(teammat, scale = T, center = T)
+autoplot(teamout, label = T, shape = F)
+
+pr.var <- teamout$sdev^2
+pve = pr.var / sum(pr.var)
+par(mfrow = c(1,2))
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", ylim = c(0,1), type = 'b')
+
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Proportion of Variance Explained", ylim = c(0,1), type = 'b')
+
+library(GGally)
+km <- kmeans(teamout$x[,1:60], centers = 3)
+View(as.data.frame(km$cluster) %>% mutate(seasonTeam = rownames(as.data.frame(km$cluster))) %>% arrange(-`km$cluster`))
+
+huh1 <- as.data.frame(teamout$rotation[,1:3]) %>% 
+  select(1)
+huh1 <- huh1 %>% 
+  mutate(thang = rownames(huh1)) 
+huh1 <- huh1 %>% 
+  arrange(-PC1)
+
+huh2 <- as.data.frame(teamout$rotation[,1:3]) %>% 
+  select(2)
+huh2 <- huh2 %>% 
+  mutate(thang = rownames(huh2)) 
+huh2 <- huh2 %>% 
+  arrange(-PC2)
+
+huh3 <- as.data.frame(teamout$rotation[,1:3]) %>% 
+  select(3)
+huh3 <- huh3 %>% 
+  mutate(thang = rownames(huh3)) 
+huh3 <- huh3 %>% 
+  arrange(-PC3)
+```
+13
+
+
